@@ -13,11 +13,23 @@ Grounded Q&A for uploaded documents and spreadsheets, with citations you can ver
 
 ## :camera: Screenshots
 
-These are lightweight SVG previews (kept in git). Replace with real app screenshots anytime.
+Real app screenshots (from the repo root):
 
-![Knowledge Hub](docs/screenshots/knowledge-hub.svg)
+| Knowledge Hub | Upload & Index |
+| --- | --- |
+| ![DocAnchor screenshot 1](chat1.png) | ![DocAnchor screenshot 2](chat2.png) |
 
-![Ask & Analyze](docs/screenshots/ask-analyze.svg)
+| Ask & Analyze | Evaluation Lab |
+| --- | --- |
+| ![DocAnchor screenshot 3](chat3.png) | ![DocAnchor screenshot 4](chat4.png) |
+
+<details>
+<summary>Design previews (SVG)</summary>
+
+![Knowledge Hub preview](docs/screenshots/knowledge-hub.svg)
+
+![Ask & Analyze preview](docs/screenshots/ask-analyze.svg)
+</details>
 
 ## :rocket: Quickstart (Local)
 
