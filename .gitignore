@@ -13,6 +13,8 @@ data/uploads/
 data/csv_data.sqlite
 data/csv_registry.json
 data/sessions/
+data/workspaces/
+data/workspaces_registry.json
 
 # Streamlit local state/secrets
 .streamlit/secrets.toml

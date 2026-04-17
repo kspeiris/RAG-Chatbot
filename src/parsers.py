@@ -13,7 +13,7 @@ from pypdf import PdfReader
 
 from src.config import settings
 from src.ocr_utils import OCRService
-from src.utils import normalize_whitespace
+from src.utils import clean_ingested_text, normalize_whitespace
 
 
 @dataclass
@@ -81,7 +81,7 @@ class FileParser:
         ocr_needed: list[int] = []
 
         for idx, page in enumerate(reader.pages, start=1):
-            text = normalize_whitespace(page.extract_text() or "")
+            text = clean_ingested_text(normalize_whitespace(page.extract_text() or ""), file_type="pdf")
             extracted_pages[idx] = text
             if self._needs_pdf_ocr(text):
                 ocr_needed.append(idx)
@@ -96,12 +96,12 @@ class FileParser:
         ocr_used_pages = 0
         for idx in range(1, len(reader.pages) + 1):
             text = extracted_pages.get(idx, "")
-            ocr_text = normalize_whitespace(ocr_results.get(idx, ""))
+            ocr_text = clean_ingested_text(normalize_whitespace(ocr_results.get(idx, "")), file_type="pdf")
             if ocr_text and (not text or len(text) < len(ocr_text) * 0.5):
                 text = ocr_text
                 ocr_used_pages += 1
             elif text and ocr_text and ocr_text not in text and len(ocr_text) > settings.ocr_min_text_chars:
-                text = normalize_whitespace(f"{text}\n\n[OCR supplement]\n{ocr_text}")
+                text = clean_ingested_text(f"{text}\n\n[OCR supplement]\n{ocr_text}", file_type="pdf")
                 ocr_used_pages += 1
 
             if text:
@@ -122,7 +122,7 @@ class FileParser:
         )
 
     def _parse_text(self, file_name: str, data: bytes) -> ParsedFile:
-        text = normalize_whitespace(self._decode_text_bytes(data)) or "No readable text was extracted."
+        text = clean_ingested_text(self._decode_text_bytes(data), file_type="text") or "No readable text was extracted."
         return ParsedFile(
             file_name=file_name,
             file_type="text",
@@ -148,9 +148,9 @@ class FileParser:
         for idx, row in df.iterrows():
             parts = [f"{col}: {row[col]}" for col in df.columns]
             text = f"Row {idx + 1}\n" + "\n".join(parts)
-            row_texts.append((idx + 1, normalize_whitespace(text)))
+            row_texts.append((idx + 1, clean_ingested_text(text, file_type="csv")))
 
-        full_text = "\n\n".join(preview_rows + [text for _, text in row_texts[:200]])
+        full_text = clean_ingested_text("\n\n".join(preview_rows + [text for _, text in row_texts[:200]]), file_type="csv")
         return ParsedFile(
             file_name=file_name,
             file_type="tsv" if Path(file_name).suffix.lower() == ".tsv" else "csv",
@@ -168,7 +168,7 @@ class FileParser:
 
         with io.BytesIO(data) as buf:
             with docx2python(buf) as docx:
-                text = normalize_whitespace(docx.text)
+                text = clean_ingested_text(docx.text, file_type="docx")
         text = text or "No readable text was extracted from the DOCX file."
         return ParsedFile(
             file_name=file_name,
@@ -191,7 +191,7 @@ class FileParser:
             for row_idx, row in df.head(200).iterrows():
                 parts = [f"{col}: {row[col]}" for col in df.columns]
                 lines.append(f"Row {row_idx + 1} | " + " | ".join(parts))
-            text = normalize_whitespace("\n".join(lines))
+            text = clean_ingested_text("\n".join(lines), file_type="xlsx")
             pages.append((idx, text))
             full_parts.append(text)
         return ParsedFile(
@@ -215,7 +215,7 @@ class FileParser:
                     payload = json.loads(line)
                 except Exception:
                     payload = {"raw": line}
-                rows.append((idx, normalize_whitespace(self._flatten_json(payload))))
+                rows.append((idx, clean_ingested_text(self._flatten_json(payload), file_type="jsonl")))
             full_text = "\n\n".join([f"[Record {idx}]\n{body}" for idx, body in rows])
             return ParsedFile(
                 file_name=file_name,
@@ -226,7 +226,7 @@ class FileParser:
             )
 
         payload = json.loads(text)
-        flat = normalize_whitespace(self._flatten_json(payload)) or "Empty JSON document"
+        flat = clean_ingested_text(self._flatten_json(payload), file_type="json") or "Empty JSON document"
         return ParsedFile(
             file_name=file_name,
             file_type="json",
@@ -242,7 +242,7 @@ class FileParser:
             tag.decompose()
         title = normalize_whitespace(soup.title.get_text(" ", strip=True)) if soup.title else ""
         text = normalize_whitespace(soup.get_text("\n"))
-        body = normalize_whitespace(f"Title: {title}\n\n{text}" if title else text) or "No readable text was extracted from the HTML file."
+        body = clean_ingested_text(f"Title: {title}\n\n{text}" if title else text, file_type="html") or "No readable text was extracted from the HTML file."
         return ParsedFile(
             file_name=file_name,
             file_type="html",
@@ -255,9 +255,9 @@ class FileParser:
         text = self._decode_text_bytes(data)
         try:
             root = ET.fromstring(text)
-            body = normalize_whitespace("\n".join(t for t in root.itertext()))
+            body = clean_ingested_text("\n".join(t for t in root.itertext()), file_type="xml")
         except Exception:
-            body = normalize_whitespace(text)
+            body = clean_ingested_text(text, file_type="xml")
         body = body or "No readable text was extracted from the XML file."
         return ParsedFile(
             file_name=file_name,
@@ -271,6 +271,8 @@ class FileParser:
         text = self.ocr.ocr_image_bytes(data)
         if not text:
             text = "No OCR text could be extracted from this image."
+        else:
+            text = clean_ingested_text(text, file_type="image")
         return ParsedFile(
             file_name=file_name,
             file_type="image",

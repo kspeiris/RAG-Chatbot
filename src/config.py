@@ -13,7 +13,7 @@ load_dotenv()
 
 @dataclass(frozen=True)
 class Settings:
-    session_id: str = ""
+    workspace_id: str = ""
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_chat_model: str = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
     answer_provider: str = os.getenv("ANSWER_PROVIDER", "local").strip().lower()
@@ -52,14 +52,14 @@ class Settings:
 
     @property
     def qdrant_path(self) -> Path:
-        if self.session_id:
-            return Path(self.qdrant_storage_path) / "sessions" / self.session_id
+        if self.workspace_id:
+            return Path(self.qdrant_storage_path) / "workspaces" / self.workspace_id
         return Path(self.qdrant_storage_path)
 
     @property
     def data_dir(self) -> Path:
-        if self.session_id:
-            return Path(self.app_data_dir) / "sessions" / self.session_id
+        if self.workspace_id:
+            return Path(self.app_data_dir) / "workspaces" / self.workspace_id
         return Path(self.app_data_dir)
 
     @property
@@ -76,13 +76,21 @@ class Settings:
 
     @property
     def scoped_collection_name(self) -> str:
-        if not self.session_id:
+        if not self.workspace_id:
             return self.collection_name
-        safe_session = re.sub(r"[^A-Za-z0-9_]+", "_", self.session_id).strip("_") or "session"
-        return f"{self.collection_name}_{safe_session}"
+        safe_workspace = re.sub(r"[^A-Za-z0-9_]+", "_", self.workspace_id).strip("_") or "workspace"
+        return f"{self.collection_name}_{safe_workspace}"
 
-    def with_session(self, session_id: str) -> "Settings":
-        return replace(self, session_id=session_id.strip())
+    def with_workspace(self, workspace_id: str) -> "Settings":
+        return replace(self, workspace_id=workspace_id.strip())
+
+    @property
+    def root_data_dir(self) -> Path:
+        return Path(self.app_data_dir)
+
+    @property
+    def root_qdrant_path(self) -> Path:
+        return Path(self.qdrant_storage_path)
 
 
 settings = Settings()

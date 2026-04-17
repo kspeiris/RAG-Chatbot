@@ -8,6 +8,7 @@ from functools import lru_cache
 from typing import Any
 
 from src.models import RetrievedChunk
+from src.utils import clean_extracted_text
 
 
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]+")
@@ -378,7 +379,7 @@ def build_evidence_block(chunks: list[RetrievedChunk]) -> str:
             f"Type: {file_type}\n"
             f"Locator: {locator}\n"
             f"{score_line}{rerank_line}\n"
-            f"Content:\n{chunk.text}"
+            f"Content:\n{clean_extracted_text(chunk.text)}"
         )
     return "\n\n".join(blocks)
 

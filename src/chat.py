@@ -8,7 +8,7 @@ from qdrant_client.http import models as rest
 from src.config import Settings
 from src.csv_query import CSVQueryService
 from src.llm import LLMService, LocalLLMUnavailableError
-from src.local_answering import build_text_answer, locator_for_chunk, route_question
+from src.local_answering import build_definition_answer, build_text_answer, locator_for_chunk, route_question
 from src.models import AnswerResult, RetrievedChunk
 from src.prompts import ANSWER_SYSTEM_PROMPT, GENERAL_DEFINITION_SYSTEM_PROMPT, ROUTER_SYSTEM_PROMPT
 from src.question_router import classify_question
@@ -39,7 +39,7 @@ class ChatService:
         has_tabular = self.csv_query.has_datasets(allowed_file_names=allowed_sources)
         has_documents = bool(self._available_document_names(allowed_sources=allowed_sources))
         question_scope = classify_question(question, has_tabular=has_tabular, has_documents=has_documents)
-        routed = self._route_question(question, question_scope)
+        routed = self._route_question(question, question_scope, allowed_sources=allowed_sources)
 
         if question_scope == "general_definition":
             return self._answer_general_question(question, routed, allowed_sources=allowed_sources)
@@ -80,6 +80,13 @@ class ChatService:
             )
 
         output = self._answer_from_selected(question, routed, selected)
+        fallback_output = build_text_answer(question, selected)
+        if (
+            not bool(output.get("grounded", False))
+            or not isinstance(output.get("citations", []), list)
+            or not output.get("citations")
+        ) and bool(fallback_output.get("grounded", False)):
+            output = fallback_output
 
         answer = str(output.get("answer", "")).strip() or "I could not produce a grounded answer."
         citations = output.get("citations", []) if isinstance(output.get("citations", []), list) else []
@@ -115,7 +122,12 @@ class ChatService:
             },
         )
 
-    def _route_question(self, question: str, question_scope: str) -> dict[str, Any]:
+    def _route_question(
+        self,
+        question: str,
+        question_scope: str,
+        allowed_sources: set[str] | None = None,
+    ) -> dict[str, Any]:
         if self.llm.supports_chat_json():
             try:
                 llm_route = self.llm.chat_json(
@@ -127,7 +139,10 @@ class ChatService:
                 return llm_route
             except LocalLLMUnavailableError:
                 pass
-        fallback_route = route_question(question, self.csv_query.has_datasets())
+        fallback_route = route_question(
+            question,
+            self.csv_query.has_datasets(allowed_file_names=allowed_sources),
+        )
         fallback_route["route_type"] = question_scope
         return fallback_route
 
@@ -144,9 +159,16 @@ class ChatService:
         )
         doc_result: AnswerResult | None = None
         best_score = max((chunk.score for chunk in selected), default=0.0)
+        definition_fallback = build_definition_answer(question, selected) if selected else None
 
         if selected and best_score >= self.settings.general_doc_match_threshold:
             doc_output = self._answer_from_selected(question, routed, selected)
+            text_fallback = build_text_answer(question, selected)
+            if not bool(doc_output.get("grounded", False)):
+                if definition_fallback is not None and bool(definition_fallback.get("grounded", False)):
+                    doc_output = definition_fallback
+                elif bool(text_fallback.get("grounded", False)):
+                    doc_output = text_fallback
             doc_result = AnswerResult(
                 answer=str(doc_output.get("answer", "")).strip() or "I could not find a reliable answer in the uploaded documents.",
                 citations=doc_output.get("citations", []) if isinstance(doc_output.get("citations", []), list) else [],
@@ -161,6 +183,10 @@ class ChatService:
                 },
             )
 
+        general_answer: str | None = None
+        general_answer_source = (
+            "openai" if self.settings.answer_provider == "openai" else "local_llm"
+        )
         try:
             general_answer = self.llm.chat_text(
                 GENERAL_DEFINITION_SYSTEM_PROMPT,
@@ -168,30 +194,42 @@ class ChatService:
                 temperature=0.2,
             )
         except LocalLLMUnavailableError:
-            general_answer = (
-                "This appears to be a general definition question, but I could not generate a local definition right now."
-            )
+            general_answer = None
+            general_answer_source = "document_fallback"
 
-        answer = general_answer.strip()
         citations: list[dict[str, Any]] = []
-        confidence = "high"
 
-        if doc_result and doc_result.grounded and doc_result.citations:
-            answer = f"{answer}\n\nFrom the uploaded documents:\n{doc_result.answer}"
+        if general_answer:
+            answer = general_answer.strip()
+            confidence = "high"
+            if doc_result and doc_result.grounded and doc_result.citations:
+                citations = doc_result.citations
+                confidence = "medium"
+        elif doc_result and doc_result.grounded:
+            answer = doc_result.answer
             citations = doc_result.citations
-            confidence = "medium"
+            confidence = doc_result.confidence
+        elif definition_fallback and definition_fallback.get("grounded"):
+            answer = str(definition_fallback.get("answer", "")).strip()
+            citations = definition_fallback.get("citations", []) if isinstance(definition_fallback.get("citations", []), list) else []
+            confidence = self._normalize_confidence(definition_fallback.get("confidence", "medium"))
+        else:
+            answer = "I could not generate a reliable definition right now."
+            confidence = "low"
 
         return AnswerResult(
             answer=answer,
             citations=citations,
             confidence=confidence,
-            grounded=False,
+            grounded=bool(citations),
             debug={
                 "router": routed,
                 "question_scope": "general_definition",
                 "source_scope": sorted(allowed_sources) if allowed_sources else "all",
                 "retrieval": {**summarize_retrieval(selected), "hybrid": hybrid_debug, "reranker": rerank_debug},
-                "general_definition_used": True,
+                "general_definition_used": bool(general_answer),
+                "general_definition_source": general_answer_source,
+                "definition_fallback_available": bool(definition_fallback and definition_fallback.get("grounded")),
                 "document_usage_included": bool(citations),
                 "document_match_threshold": self.settings.general_doc_match_threshold,
                 "document_match_score": best_score,
@@ -215,6 +253,9 @@ class ChatService:
         doc_result: AnswerResult | None = None
         if selected:
             doc_output = self._answer_from_selected(question, routed, selected)
+            text_fallback = build_text_answer(question, selected)
+            if not bool(doc_output.get("grounded", False)) and bool(text_fallback.get("grounded", False)):
+                doc_output = text_fallback
             doc_result = AnswerResult(
                 answer=str(doc_output.get("answer", "")).strip() or "I could not find a reliable answer in the uploaded documents.",
                 citations=doc_output.get("citations", []) if isinstance(doc_output.get("citations", []), list) else [],
