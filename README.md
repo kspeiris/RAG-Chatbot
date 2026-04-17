@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="chathero.png" alt="DocAnchor — Streamlit RAG + tabular analytics" width="100%" />
+</p>
+
 # DocAnchor (Streamlit RAG + Tabular Analytics)
 
 Grounded Q&A for uploaded documents and spreadsheets, with citations you can verify. Organize knowledge into workspaces, index mixed file types, and route questions through either document retrieval or safe SQLite analytics.
