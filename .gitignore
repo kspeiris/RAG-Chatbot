@@ -9,12 +9,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-data/uploads/
-data/csv_data.sqlite
-data/csv_registry.json
-data/sessions/
-data/workspaces/
-data/workspaces_registry.json
+data/
 
 # Streamlit local state/secrets
 .streamlit/secrets.toml
