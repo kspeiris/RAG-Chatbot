@@ -28,6 +28,7 @@ def init_state() -> None:
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("last_result", None)
     st.session_state.setdefault("evaluation_runs", [])
+    st.session_state.setdefault("use_source_scope", False)
     st.session_state.setdefault("selected_sources", [])
 
 
@@ -46,6 +47,7 @@ csv_registry = CSVRegistry(session_settings)
 evaluation_store = EvaluationStore(session_settings)
 indexed_docs = vector_store.list_documents() if session_settings.qdrant_path.exists() else []
 indexed_csvs = csv_registry.list_datasets()
+all_sources = sorted(set(indexed_docs + [item["file_name"] for item in indexed_csvs]))
 
 with st.sidebar:
     st.header("Setup")
@@ -60,49 +62,30 @@ with st.sidebar:
         st.session_state.selected_sources = []
         st.rerun()
     st.divider()
-    st.subheader("Reliability settings")
-    st.write(f"Strict grounded mode: `{session_settings.strict_grounded_mode}`")
-    st.write(f"Answer provider: `{session_settings.answer_provider}`")
-    st.write(f"Ollama base URL: `{session_settings.ollama_base_url}`")
-    st.write(f"Ollama chat model: `{session_settings.ollama_chat_model}`")
-    st.write(f"Embedding provider: `{session_settings.embedding_provider}`")
-    st.write(
-        f"Embedding model: `{session_settings.local_embedding_model if session_settings.embedding_provider == 'local' else session_settings.openai_embedding_model}`"
-    )
-    st.write(f"Session collection: `{session_settings.scoped_collection_name}`")
-    st.write(f"Session vector path: `{session_settings.qdrant_path}`")
-    st.write(f"Session data path: `{session_settings.data_dir}`")
-    st.write(f"Top context chunks: `{session_settings.max_context_chunks}`")
-    st.write(f"Vector candidates: `{session_settings.rerank_candidates}`")
-    st.write(f"BM25 candidates: `{session_settings.bm25_candidates}`")
-    st.write(f"Adjacent chunk window: `{session_settings.adjacent_chunk_window}`")
-    st.write(f"Cross-encoder reranker: `{session_settings.enable_cross_encoder_reranker}`")
-    st.write(f"Reranker model: `{session_settings.reranker_model_name}`")
-    st.write(f"Chunk size / overlap: `{session_settings.chunk_size}` / `{session_settings.chunk_overlap}`")
-    st.write(f"Minimum chunk chars: `{session_settings.min_chunk_chars}`")
-    st.write(f"Minimum similarity: `{session_settings.min_similarity_score}`")
-    st.write(f"OCR enabled: `{session_settings.ocr_enabled}`")
-    st.write(f"OCR language: `{session_settings.ocr_language}`")
-    st.write(f"Max OCR PDF pages: `{session_settings.ocr_max_pdf_pages}`")
-    st.write(f"Max SQL result rows: `{session_settings.max_sql_result_rows}`")
-    st.divider()
     st.subheader("Indexed knowledge")
     st.write(f"Documents in vector store: `{len(indexed_docs)}`")
     st.write(f"Tabular datasets with structured analytics: `{len(indexed_csvs)}`")
-    all_sources = sorted(set(indexed_docs + [item["file_name"] for item in indexed_csvs]))
     default_sources = [source for source in st.session_state.selected_sources if source in all_sources] or all_sources
-    selected_sources = st.multiselect(
-        "Source scope",
-        options=all_sources,
-        default=default_sources,
-        help="Only the selected sources will be queried.",
-    )
+    with st.expander("Advanced source scope"):
+        use_source_scope = st.checkbox(
+            "Limit queries to selected files",
+            value=st.session_state.use_source_scope,
+            help="By default the whole current session is queried. Enable this only when you want to debug or narrow retrieval.",
+        )
+        selected_sources = st.multiselect(
+            "Selected files",
+            options=all_sources,
+            default=default_sources,
+            help="These files are used only when advanced source scoping is enabled.",
+        )
+    st.session_state.use_source_scope = use_source_scope
     st.session_state.selected_sources = selected_sources
     if st.button("Clear indexed knowledge", use_container_width=True):
         vector_store.clear_collection()
         csv_registry.clear()
         st.session_state.messages = []
         st.session_state.last_result = None
+        st.session_state.use_source_scope = False
         st.session_state.selected_sources = []
         st.success("Indexed documents and tabular datasets were cleared.")
         st.rerun()
@@ -110,66 +93,113 @@ with st.sidebar:
         with st.expander("Tabular datasets"):
             for dataset in indexed_csvs:
                 st.markdown(f"- **{dataset['file_name']}** - {dataset['row_count']} rows")
+    with st.expander("Advanced diagnostics"):
+        st.write(f"Strict grounded mode: `{session_settings.strict_grounded_mode}`")
+        st.write(f"Answer provider: `{session_settings.answer_provider}`")
+        st.write(f"Ollama base URL: `{session_settings.ollama_base_url}`")
+        st.write(f"Ollama chat model: `{session_settings.ollama_chat_model}`")
+        st.write(f"Embedding provider: `{session_settings.embedding_provider}`")
+        st.write(
+            f"Embedding model: `{session_settings.local_embedding_model if session_settings.embedding_provider == 'local' else session_settings.openai_embedding_model}`"
+        )
+        st.write(f"Session collection: `{session_settings.scoped_collection_name}`")
+        st.write(f"Session vector path: `{session_settings.qdrant_path}`")
+        st.write(f"Session data path: `{session_settings.data_dir}`")
+        st.write(f"Top context chunks: `{session_settings.max_context_chunks}`")
+        st.write(f"Vector candidates: `{session_settings.rerank_candidates}`")
+        st.write(f"BM25 candidates: `{session_settings.bm25_candidates}`")
+        st.write(f"Adjacent chunk window: `{session_settings.adjacent_chunk_window}`")
+        st.write(f"Cross-encoder reranker: `{session_settings.enable_cross_encoder_reranker}`")
+        st.write(f"Reranker model: `{session_settings.reranker_model_name}`")
+        st.write(f"Chunk size / overlap: `{session_settings.chunk_size}` / `{session_settings.chunk_overlap}`")
+        st.write(f"Minimum chunk chars: `{session_settings.min_chunk_chars}`")
+        st.write(f"Minimum similarity: `{session_settings.min_similarity_score}`")
+        st.write(f"OCR enabled: `{session_settings.ocr_enabled}`")
+        st.write(f"OCR language: `{session_settings.ocr_language}`")
+        st.write(f"Max OCR PDF pages: `{session_settings.ocr_max_pdf_pages}`")
+        st.write(f"Max SQL result rows: `{session_settings.max_sql_result_rows}`")
 
-col1, col2 = st.columns([1, 1])
+status_cols = st.columns(4)
+status_cols[0].metric("Session", st.session_state.session_id)
+status_cols[1].metric("Documents", len(indexed_docs))
+status_cols[2].metric("Tables", len(indexed_csvs))
+scope_label = "All session files"
+if st.session_state.use_source_scope and st.session_state.selected_sources:
+    scope_label = f"{len(st.session_state.selected_sources)} selected"
+status_cols[3].metric("Scope", scope_label)
 
-with col1:
-    st.subheader("1) Upload knowledge files")
-    replace_existing = st.checkbox("Replace previously indexed knowledge", value=False)
-    uploaded_files = st.file_uploader(
-        "Upload one or more files",
-        type=["pdf", "txt", "md", "csv", "tsv", "docx", "xlsx", "json", "jsonl", "html", "htm", "xml", "png", "jpg", "jpeg", "webp", "tif", "tiff"],
-        accept_multiple_files=True,
-    )
+if all_sources:
+    with st.expander("Session status", expanded=False):
+        st.write("Files available in this session:")
+        for source in all_sources:
+            st.markdown(f"- {source}")
+else:
+    st.info("This session is empty. Upload one or more files to start.")
 
-    if st.button("Index uploaded files", type="primary", use_container_width=True):
-        if not uploaded_files:
-            st.warning("Please upload at least one file.")
-        else:
-            try:
-                ingestor = IngestionService(session_settings)
-                if replace_existing:
-                    vector_store.clear_collection()
-                    csv_registry.clear()
-                    st.session_state.messages = []
-                    st.session_state.last_result = None
-                results = []
-                for file in uploaded_files:
-                    result = ingestor.ingest_bytes(file.name, file.getvalue())
-                    results.append(result)
-                st.session_state.selected_sources = [result.file_name for result in results]
-                st.success("Indexing complete.")
-                for result in results:
-                    st.write(f"- {result.file_name}: {result.chunks_created} chunks")
-            except Exception as exc:
-                st.error(f"Indexing failed: {exc}")
-                st.code(traceback.format_exc())
+st.divider()
 
-with col2:
-    st.subheader("2) Ask questions")
-    question = st.text_area(
-        "Ask a grounded question",
-        placeholder="Examples: What does the handbook say about minimum attendance? | Which students are below 75% attendance? | Count orders per region. | What text appears in this scanned notice?",
-        height=120,
-    )
-    if st.button("Get answer", use_container_width=True):
-        if not question.strip():
-            st.warning("Enter a question first.")
-        else:
-            try:
-                chat = ChatService(session_settings)
-                source_scope = set(st.session_state.selected_sources) if st.session_state.selected_sources else None
-                result = chat.answer_question(question.strip(), allowed_sources=source_scope)
-                st.session_state.last_result = result
-                st.session_state.messages.append({"role": "user", "content": question.strip()})
-                st.session_state.messages.append({"role": "assistant", "content": result.answer})
-            except QuotaExceededError as exc:
-                st.error(str(exc))
-            except LocalLLMUnavailableError as exc:
-                st.error(str(exc))
-            except Exception as exc:
-                st.error(f"Answer generation failed: {exc}")
-                st.code(traceback.format_exc())
+st.subheader("1) Upload knowledge files")
+replace_existing = st.checkbox("Replace previously indexed knowledge", value=False)
+uploaded_files = st.file_uploader(
+    "Upload one or more files",
+    type=["pdf", "txt", "md", "csv", "tsv", "docx", "xlsx", "json", "jsonl", "html", "htm", "xml", "png", "jpg", "jpeg", "webp", "tif", "tiff"],
+    accept_multiple_files=True,
+)
+
+if st.button("Index uploaded files", type="primary", use_container_width=True):
+    if not uploaded_files:
+        st.warning("Please upload at least one file.")
+    else:
+        try:
+            ingestor = IngestionService(session_settings)
+            if replace_existing:
+                vector_store.clear_collection()
+                csv_registry.clear()
+                st.session_state.messages = []
+                st.session_state.last_result = None
+                st.session_state.use_source_scope = False
+            results = []
+            for file in uploaded_files:
+                result = ingestor.ingest_bytes(file.name, file.getvalue())
+                results.append(result)
+            st.session_state.selected_sources = [result.file_name for result in results]
+            st.success("Indexing complete.")
+            for result in results:
+                st.write(f"- {result.file_name}: {result.chunks_created} chunks")
+        except Exception as exc:
+            st.error(f"Indexing failed: {exc}")
+            st.code(traceback.format_exc())
+
+st.divider()
+
+st.subheader("2) Ask questions")
+question = st.text_area(
+    "Ask a grounded question",
+    placeholder="Examples: What does the handbook say about minimum attendance? | Which students are below 75% attendance? | Count orders per region. | What text appears in this scanned notice?",
+    height=120,
+)
+if st.button("Get answer", use_container_width=True):
+    if not question.strip():
+        st.warning("Enter a question first.")
+    else:
+        try:
+            chat = ChatService(session_settings)
+            source_scope = (
+                set(st.session_state.selected_sources)
+                if st.session_state.use_source_scope and st.session_state.selected_sources
+                else None
+            )
+            result = chat.answer_question(question.strip(), allowed_sources=source_scope)
+            st.session_state.last_result = result
+            st.session_state.messages.append({"role": "user", "content": question.strip()})
+            st.session_state.messages.append({"role": "assistant", "content": result.answer})
+        except QuotaExceededError as exc:
+            st.error(str(exc))
+        except LocalLLMUnavailableError as exc:
+            st.error(str(exc))
+        except Exception as exc:
+            st.error(f"Answer generation failed: {exc}")
+            st.code(traceback.format_exc())
 
 st.divider()
 
@@ -190,9 +220,18 @@ with tab_chat:
             st.info("Your latest grounded answer will appear here.")
         else:
             route_type = result.debug.get("router", {}).get("route_type", result.debug.get("question_scope", "unknown"))
-            st.write(f"Route: `{route_type}`")
-            st.write(f"Confidence: {badge_for_confidence(result.confidence)}")
-            st.write(f"Status: **{grounded_label(result)}**")
+            diag_cards = st.columns(3)
+            diag_cards[0].metric("Route", route_type)
+            diag_cards[1].metric("Confidence", badge_for_confidence(result.confidence))
+            diag_cards[2].metric("Status", grounded_label(result))
+            st.markdown("**Evidence summary**")
+            st.write(f"Citations: `{len(result.citations)}`")
+            if result.debug.get("source_scope"):
+                scope_value = result.debug.get("source_scope")
+                if isinstance(scope_value, list):
+                    st.write(f"Scope: `{len(scope_value)}` selected file(s)")
+                else:
+                    st.write(f"Scope: `{scope_value}`")
             st.markdown("**Citations**")
             if result.citations:
                 for cite in result.citations:
@@ -205,7 +244,7 @@ with tab_chat:
             else:
                 st.write("No citation objects returned.")
 
-            with st.expander("Debug details"):
+            with st.expander("Advanced debug"):
                 st.json(result.debug)
 
 with tab_eval:
@@ -248,7 +287,11 @@ with tab_eval:
                 chat = ChatService(session_settings)
                 progress = st.progress(0.0)
                 for idx, case in enumerate(cases, start=1):
-                    source_scope = set(st.session_state.selected_sources) if st.session_state.selected_sources else None
+                    source_scope = (
+                        set(st.session_state.selected_sources)
+                        if st.session_state.use_source_scope and st.session_state.selected_sources
+                        else None
+                    )
                     result = chat.answer_question(str(case.get("question", "")).strip(), allowed_sources=source_scope)
                     evaluation = evaluate_answer(case, result)
                     runs.append(
