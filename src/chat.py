@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from qdrant_client.http import models as rest
+
 from src.config import Settings
 from src.csv_query import CSVQueryService
 from src.llm import LLMService, LocalLLMUnavailableError
@@ -25,7 +27,7 @@ class ChatService:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.llm = LLMService(settings)
-        self.store = VectorStore(path=str(settings.qdrant_path), collection_name=settings.collection_name)
+        self.store = VectorStore(path=str(settings.qdrant_path), collection_name=settings.scoped_collection_name)
         self.hybrid_retriever = HybridRetriever()
         self.reranker = AdvancedReranker(
             enabled=settings.enable_cross_encoder_reranker,
@@ -33,21 +35,30 @@ class ChatService:
         )
         self.csv_query = CSVQueryService(settings, llm=self.llm)
 
-    def answer_question(self, question: str) -> AnswerResult:
-        routed = self._route_question(question)
-        question_scope = classify_question(question)
+    def answer_question(self, question: str, allowed_sources: set[str] | None = None) -> AnswerResult:
+        has_tabular = self.csv_query.has_datasets(allowed_file_names=allowed_sources)
+        has_documents = bool(self._available_document_names(allowed_sources=allowed_sources))
+        question_scope = classify_question(question, has_tabular=has_tabular, has_documents=has_documents)
+        routed = self._route_question(question, question_scope)
 
-        if question_scope == "general":
-            return self._answer_general_question(question, routed)
+        if question_scope == "general_definition":
+            return self._answer_general_question(question, routed, allowed_sources=allowed_sources)
+        if question_scope == "hybrid":
+            return self._answer_hybrid_question(question, routed, allowed_sources=allowed_sources)
 
         structured_attempt = None
-        if self._should_try_structured(question, routed):
-            structured_attempt = self.csv_query.try_answer(question)
+        if self._should_try_structured(question, routed, allowed_sources=allowed_sources):
+            structured_attempt = self.csv_query.try_answer(question, allowed_file_names=allowed_sources)
             if structured_attempt and structured_attempt.grounded:
                 structured_attempt.debug["router"] = routed
+                structured_attempt.debug["question_scope"] = question_scope
                 return structured_attempt
 
-        selected, hybrid_debug, rerank_debug = self._retrieve_selected_chunks(question)
+        selected, hybrid_debug, rerank_debug = self._retrieve_selected_chunks(
+            question,
+            allowed_sources=allowed_sources,
+            include_tabular=False,
+        )
 
         if not selected:
             if structured_attempt is not None:
@@ -63,6 +74,7 @@ class ChatService:
                 debug={
                     "router": routed,
                     "question_scope": question_scope,
+                    "source_scope": sorted(allowed_sources) if allowed_sources else "all",
                     "retrieval": {"retrieved_chunks": 0, "hybrid": hybrid_debug, "reranker": rerank_debug},
                 },
             )
@@ -95,6 +107,7 @@ class ChatService:
             debug={
                 "router": routed,
                 "question_scope": question_scope,
+                "source_scope": sorted(allowed_sources) if allowed_sources else "all",
                 "retrieval": {**summarize_retrieval(selected), "hybrid": hybrid_debug, "reranker": rerank_debug},
                 "unsupported_claims": unsupported_claims,
                 "citation_validation": citation_check,
@@ -102,20 +115,33 @@ class ChatService:
             },
         )
 
-    def _route_question(self, question: str) -> dict[str, Any]:
+    def _route_question(self, question: str, question_scope: str) -> dict[str, Any]:
         if self.llm.supports_chat_json():
             try:
-                return self.llm.chat_json(
+                llm_route = self.llm.chat_json(
                     ROUTER_SYSTEM_PROMPT,
                     f"Question: {question}\nReturn JSON only.",
                     temperature=0,
                 )
+                llm_route["route_type"] = question_scope
+                return llm_route
             except LocalLLMUnavailableError:
                 pass
-        return route_question(question, self.csv_query.has_datasets())
+        fallback_route = route_question(question, self.csv_query.has_datasets())
+        fallback_route["route_type"] = question_scope
+        return fallback_route
 
-    def _answer_general_question(self, question: str, routed: dict[str, Any]) -> AnswerResult:
-        selected, hybrid_debug, rerank_debug = self._retrieve_selected_chunks(question)
+    def _answer_general_question(
+        self,
+        question: str,
+        routed: dict[str, Any],
+        allowed_sources: set[str] | None = None,
+    ) -> AnswerResult:
+        selected, hybrid_debug, rerank_debug = self._retrieve_selected_chunks(
+            question,
+            allowed_sources=allowed_sources,
+            include_tabular=False,
+        )
         doc_result: AnswerResult | None = None
         best_score = max((chunk.score for chunk in selected), default=0.0)
 
@@ -162,13 +188,100 @@ class ChatService:
             grounded=False,
             debug={
                 "router": routed,
-                "question_scope": "general",
+                "question_scope": "general_definition",
+                "source_scope": sorted(allowed_sources) if allowed_sources else "all",
                 "retrieval": {**summarize_retrieval(selected), "hybrid": hybrid_debug, "reranker": rerank_debug},
                 "general_definition_used": True,
                 "document_usage_included": bool(citations),
                 "document_match_threshold": self.settings.general_doc_match_threshold,
                 "document_match_score": best_score,
                 "document_result": doc_result.debug if doc_result else None,
+            },
+        )
+
+    def _answer_hybrid_question(
+        self,
+        question: str,
+        routed: dict[str, Any],
+        allowed_sources: set[str] | None = None,
+    ) -> AnswerResult:
+        structured_result = self.csv_query.try_answer(question, allowed_file_names=allowed_sources)
+        selected, hybrid_debug, rerank_debug = self._retrieve_selected_chunks(
+            question,
+            allowed_sources=allowed_sources,
+            include_tabular=False,
+        )
+
+        doc_result: AnswerResult | None = None
+        if selected:
+            doc_output = self._answer_from_selected(question, routed, selected)
+            doc_result = AnswerResult(
+                answer=str(doc_output.get("answer", "")).strip() or "I could not find a reliable answer in the uploaded documents.",
+                citations=doc_output.get("citations", []) if isinstance(doc_output.get("citations", []), list) else [],
+                confidence=self._normalize_confidence(doc_output.get("confidence", "low")),
+                grounded=bool(doc_output.get("grounded", False)),
+                debug={
+                    "unsupported_claims": doc_output.get("unsupported_claims", []),
+                    "citation_validation": self._validate_citations(
+                        doc_output.get("citations", []) if isinstance(doc_output.get("citations", []), list) else [],
+                        selected,
+                    ),
+                },
+            )
+
+        if structured_result and doc_result and doc_result.grounded:
+            return AnswerResult(
+                answer=(
+                    f"From the uploaded documents:\n{doc_result.answer}\n\n"
+                    f"From the tabular data:\n{structured_result.answer}"
+                ),
+                citations=doc_result.citations + structured_result.citations,
+                confidence="medium",
+                grounded=True,
+                debug={
+                    "router": routed,
+                    "question_scope": "hybrid",
+                    "source_scope": sorted(allowed_sources) if allowed_sources else "all",
+                    "retrieval": {**summarize_retrieval(selected), "hybrid": hybrid_debug, "reranker": rerank_debug},
+                    "structured_result": structured_result.debug,
+                    "document_result": doc_result.debug,
+                },
+            )
+
+        if structured_result:
+            structured_result.debug["router"] = routed
+            structured_result.debug["question_scope"] = "hybrid"
+            structured_result.debug["source_scope"] = sorted(allowed_sources) if allowed_sources else "all"
+            structured_result.debug["fallback_reason"] = "document_path_unavailable"
+            return structured_result
+
+        if doc_result is not None:
+            return AnswerResult(
+                answer=doc_result.answer,
+                citations=doc_result.citations,
+                confidence=doc_result.confidence,
+                grounded=doc_result.grounded,
+                debug={
+                    "router": routed,
+                    "question_scope": "hybrid",
+                    "source_scope": sorted(allowed_sources) if allowed_sources else "all",
+                    "retrieval": {**summarize_retrieval(selected), "hybrid": hybrid_debug, "reranker": rerank_debug},
+                    "fallback_reason": "structured_path_unavailable",
+                    "document_result": doc_result.debug,
+                },
+            )
+
+        return AnswerResult(
+            answer="I could not find a reliable answer from the selected documents and tabular datasets.",
+            citations=[],
+            confidence="low",
+            grounded=False,
+            debug={
+                "router": routed,
+                "question_scope": "hybrid",
+                "source_scope": sorted(allowed_sources) if allowed_sources else "all",
+                "retrieval": {"retrieved_chunks": 0, "hybrid": hybrid_debug, "reranker": rerank_debug},
+                "fallback_reason": "no_hybrid_sources_matched",
             },
         )
 
@@ -187,10 +300,24 @@ class ChatService:
                 pass
         return build_text_answer(question, selected)
 
-    def _retrieve_selected_chunks(self, question: str) -> tuple[list[RetrievedChunk], dict[str, Any], dict[str, Any]]:
+    def _retrieve_selected_chunks(
+        self,
+        question: str,
+        allowed_sources: set[str] | None = None,
+        include_tabular: bool = True,
+    ) -> tuple[list[RetrievedChunk], dict[str, Any], dict[str, Any]]:
         query_vector = self.llm.embed_query(question)
-        vector_candidates = self.store.search(query_vector, limit=self.settings.rerank_candidates)
-        corpus_chunks = self.store.list_all_chunks()
+        query_filter = self._build_source_filter(allowed_sources=allowed_sources, include_tabular=include_tabular)
+        vector_candidates = self._filter_chunks(
+            self.store.search(query_vector, limit=self.settings.rerank_candidates, filters=query_filter),
+            allowed_sources=allowed_sources,
+            include_tabular=include_tabular,
+        )
+        corpus_chunks = self._filter_chunks(
+            self.store.list_all_chunks(),
+            allowed_sources=allowed_sources,
+            include_tabular=include_tabular,
+        )
         hybrid_candidates, hybrid_debug = self.hybrid_retriever.combine(
             question=question,
             vector_results=vector_candidates,
@@ -211,15 +338,29 @@ class ChatService:
         )
         return selected, hybrid_debug, rerank_debug
 
-    def _should_try_structured(self, question: str, routed: dict[str, Any]) -> bool:
-        if not self.csv_query.has_datasets():
+    def _should_try_structured(
+        self,
+        question: str,
+        routed: dict[str, Any],
+        allowed_sources: set[str] | None = None,
+    ) -> bool:
+        if not self.csv_query.has_datasets(allowed_file_names=allowed_sources):
             return False
         if str(routed.get("answer_type", "")).strip().lower() == "tabular":
+            return True
+        if self.csv_query.answer_schema_question(question, allowed_file_names=allowed_sources) is not None:
             return True
         lowered = question.lower()
         triggers = [
             "how many",
             "count",
+            "column",
+            "columns",
+            "header",
+            "headers",
+            "field",
+            "fields",
+            "row count",
             "sum",
             "average",
             "avg",
@@ -284,3 +425,47 @@ class ChatService:
         if normalized in {"high", "medium", "low"}:
             return normalized
         return "low"
+
+    def _available_document_names(self, allowed_sources: set[str] | None = None) -> list[str]:
+        docs: list[str] = []
+        for file_name in self.store.list_documents():
+            if allowed_sources and file_name not in allowed_sources:
+                continue
+            lowered = file_name.lower()
+            if lowered.endswith((".csv", ".tsv", ".xlsx")):
+                continue
+            docs.append(file_name)
+        return docs
+
+    @staticmethod
+    def _filter_chunks(
+        chunks: list[RetrievedChunk],
+        allowed_sources: set[str] | None = None,
+        include_tabular: bool = True,
+    ) -> list[RetrievedChunk]:
+        filtered: list[RetrievedChunk] = []
+        for chunk in chunks:
+            file_name = str(chunk.metadata.get("file_name", ""))
+            if allowed_sources and file_name not in allowed_sources:
+                continue
+            file_type = str(chunk.metadata.get("file_type", "")).lower()
+            if not include_tabular and file_type in {"csv", "tsv", "xlsx"}:
+                continue
+            filtered.append(chunk)
+        return filtered
+
+    @staticmethod
+    def _build_source_filter(
+        allowed_sources: set[str] | None = None,
+        include_tabular: bool = True,
+    ) -> rest.Filter | None:
+        if not allowed_sources:
+            return None
+        return rest.Filter(
+            must=[
+                rest.FieldCondition(
+                    key="file_name",
+                    match=rest.MatchAny(any=list(sorted(allowed_sources))),
+                )
+            ]
+        )

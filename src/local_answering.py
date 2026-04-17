@@ -15,6 +15,13 @@ def route_question(question: str, has_datasets: bool) -> dict[str, str | bool]:
     tabular_triggers = [
         "how many",
         "count",
+        "column",
+        "columns",
+        "header",
+        "headers",
+        "field",
+        "fields",
+        "row count",
         "sum",
         "average",
         "avg",

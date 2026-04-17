@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -11,6 +13,7 @@ load_dotenv()
 
 @dataclass(frozen=True)
 class Settings:
+    session_id: str = ""
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_chat_model: str = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
     answer_provider: str = os.getenv("ANSWER_PROVIDER", "local").strip().lower()
@@ -49,10 +52,14 @@ class Settings:
 
     @property
     def qdrant_path(self) -> Path:
+        if self.session_id:
+            return Path(self.qdrant_storage_path) / "sessions" / self.session_id
         return Path(self.qdrant_storage_path)
 
     @property
     def data_dir(self) -> Path:
+        if self.session_id:
+            return Path(self.app_data_dir) / "sessions" / self.session_id
         return Path(self.app_data_dir)
 
     @property
@@ -66,6 +73,16 @@ class Settings:
     @property
     def evaluation_cases_path(self) -> Path:
         return self.data_dir / self.evaluation_cases_name
+
+    @property
+    def scoped_collection_name(self) -> str:
+        if not self.session_id:
+            return self.collection_name
+        safe_session = re.sub(r"[^A-Za-z0-9_]+", "_", self.session_id).strip("_") or "session"
+        return f"{self.collection_name}_{safe_session}"
+
+    def with_session(self, session_id: str) -> "Settings":
+        return replace(self, session_id=session_id.strip())
 
 
 settings = Settings()

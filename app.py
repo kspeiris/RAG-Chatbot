@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import traceback
+from uuid import uuid4
 
 import streamlit as st
 
@@ -23,9 +24,11 @@ st.set_page_config(page_title="Reliable RAG Chatbot", page_icon="📚", layout="
 
 
 def init_state() -> None:
+    st.session_state.setdefault("session_id", uuid4().hex[:12])
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("last_result", None)
     st.session_state.setdefault("evaluation_runs", [])
+    st.session_state.setdefault("selected_sources", [])
 
 
 init_state()
@@ -36,41 +39,73 @@ st.caption(
     "The assistant answers from uploaded evidence and can run grounded tabular analytics with pandas/SQLite."
 )
 
-vector_store = VectorStore(path=str(settings.qdrant_path), collection_name=settings.collection_name)
-csv_registry = CSVRegistry(settings)
-evaluation_store = EvaluationStore(settings)
-indexed_docs = vector_store.list_documents() if settings.qdrant_path.exists() else []
+session_settings = settings.with_session(st.session_state.session_id)
+
+vector_store = VectorStore(path=str(session_settings.qdrant_path), collection_name=session_settings.scoped_collection_name)
+csv_registry = CSVRegistry(session_settings)
+evaluation_store = EvaluationStore(session_settings)
+indexed_docs = vector_store.list_documents() if session_settings.qdrant_path.exists() else []
 indexed_csvs = csv_registry.list_datasets()
 
 with st.sidebar:
     st.header("Setup")
+    st.caption(f"Session: `{st.session_state.session_id}`")
     st.write("The app can run fully locally with no API key. OpenAI is only needed if you explicitly set `ANSWER_PROVIDER=openai`.")
     st.write("Indexed storage uses local Qdrant mode plus local SQLite for tabular analytics. OCR is used when available for scanned PDFs and images.")
+    if st.button("Start new session", use_container_width=True):
+        st.session_state.session_id = uuid4().hex[:12]
+        st.session_state.messages = []
+        st.session_state.last_result = None
+        st.session_state.evaluation_runs = []
+        st.session_state.selected_sources = []
+        st.rerun()
     st.divider()
     st.subheader("Reliability settings")
-    st.write(f"Strict grounded mode: `{settings.strict_grounded_mode}`")
-    st.write(f"Answer provider: `{settings.answer_provider}`")
-    st.write(f"Ollama base URL: `{settings.ollama_base_url}`")
-    st.write(f"Ollama chat model: `{settings.ollama_chat_model}`")
-    st.write(f"Embedding provider: `{settings.embedding_provider}`")
-    st.write(f"Embedding model: `{settings.local_embedding_model if settings.embedding_provider == 'local' else settings.openai_embedding_model}`")
-    st.write(f"Top context chunks: `{settings.max_context_chunks}`")
-    st.write(f"Vector candidates: `{settings.rerank_candidates}`")
-    st.write(f"BM25 candidates: `{settings.bm25_candidates}`")
-    st.write(f"Adjacent chunk window: `{settings.adjacent_chunk_window}`")
-    st.write(f"Cross-encoder reranker: `{settings.enable_cross_encoder_reranker}`")
-    st.write(f"Reranker model: `{settings.reranker_model_name}`")
-    st.write(f"Chunk size / overlap: `{settings.chunk_size}` / `{settings.chunk_overlap}`")
-    st.write(f"Minimum chunk chars: `{settings.min_chunk_chars}`")
-    st.write(f"Minimum similarity: `{settings.min_similarity_score}`")
-    st.write(f"OCR enabled: `{settings.ocr_enabled}`")
-    st.write(f"OCR language: `{settings.ocr_language}`")
-    st.write(f"Max OCR PDF pages: `{settings.ocr_max_pdf_pages}`")
-    st.write(f"Max SQL result rows: `{settings.max_sql_result_rows}`")
+    st.write(f"Strict grounded mode: `{session_settings.strict_grounded_mode}`")
+    st.write(f"Answer provider: `{session_settings.answer_provider}`")
+    st.write(f"Ollama base URL: `{session_settings.ollama_base_url}`")
+    st.write(f"Ollama chat model: `{session_settings.ollama_chat_model}`")
+    st.write(f"Embedding provider: `{session_settings.embedding_provider}`")
+    st.write(
+        f"Embedding model: `{session_settings.local_embedding_model if session_settings.embedding_provider == 'local' else session_settings.openai_embedding_model}`"
+    )
+    st.write(f"Session collection: `{session_settings.scoped_collection_name}`")
+    st.write(f"Session vector path: `{session_settings.qdrant_path}`")
+    st.write(f"Session data path: `{session_settings.data_dir}`")
+    st.write(f"Top context chunks: `{session_settings.max_context_chunks}`")
+    st.write(f"Vector candidates: `{session_settings.rerank_candidates}`")
+    st.write(f"BM25 candidates: `{session_settings.bm25_candidates}`")
+    st.write(f"Adjacent chunk window: `{session_settings.adjacent_chunk_window}`")
+    st.write(f"Cross-encoder reranker: `{session_settings.enable_cross_encoder_reranker}`")
+    st.write(f"Reranker model: `{session_settings.reranker_model_name}`")
+    st.write(f"Chunk size / overlap: `{session_settings.chunk_size}` / `{session_settings.chunk_overlap}`")
+    st.write(f"Minimum chunk chars: `{session_settings.min_chunk_chars}`")
+    st.write(f"Minimum similarity: `{session_settings.min_similarity_score}`")
+    st.write(f"OCR enabled: `{session_settings.ocr_enabled}`")
+    st.write(f"OCR language: `{session_settings.ocr_language}`")
+    st.write(f"Max OCR PDF pages: `{session_settings.ocr_max_pdf_pages}`")
+    st.write(f"Max SQL result rows: `{session_settings.max_sql_result_rows}`")
     st.divider()
     st.subheader("Indexed knowledge")
     st.write(f"Documents in vector store: `{len(indexed_docs)}`")
     st.write(f"Tabular datasets with structured analytics: `{len(indexed_csvs)}`")
+    all_sources = sorted(set(indexed_docs + [item["file_name"] for item in indexed_csvs]))
+    default_sources = [source for source in st.session_state.selected_sources if source in all_sources] or all_sources
+    selected_sources = st.multiselect(
+        "Source scope",
+        options=all_sources,
+        default=default_sources,
+        help="Only the selected sources will be queried.",
+    )
+    st.session_state.selected_sources = selected_sources
+    if st.button("Clear indexed knowledge", use_container_width=True):
+        vector_store.clear_collection()
+        csv_registry.clear()
+        st.session_state.messages = []
+        st.session_state.last_result = None
+        st.session_state.selected_sources = []
+        st.success("Indexed documents and tabular datasets were cleared.")
+        st.rerun()
     if indexed_csvs:
         with st.expander("Tabular datasets"):
             for dataset in indexed_csvs:
@@ -80,6 +115,7 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("1) Upload knowledge files")
+    replace_existing = st.checkbox("Replace previously indexed knowledge", value=False)
     uploaded_files = st.file_uploader(
         "Upload one or more files",
         type=["pdf", "txt", "md", "csv", "tsv", "docx", "xlsx", "json", "jsonl", "html", "htm", "xml", "png", "jpg", "jpeg", "webp", "tif", "tiff"],
@@ -91,11 +127,17 @@ with col1:
             st.warning("Please upload at least one file.")
         else:
             try:
-                ingestor = IngestionService(settings)
+                ingestor = IngestionService(session_settings)
+                if replace_existing:
+                    vector_store.clear_collection()
+                    csv_registry.clear()
+                    st.session_state.messages = []
+                    st.session_state.last_result = None
                 results = []
                 for file in uploaded_files:
                     result = ingestor.ingest_bytes(file.name, file.getvalue())
                     results.append(result)
+                st.session_state.selected_sources = [result.file_name for result in results]
                 st.success("Indexing complete.")
                 for result in results:
                     st.write(f"- {result.file_name}: {result.chunks_created} chunks")
@@ -115,8 +157,9 @@ with col2:
             st.warning("Enter a question first.")
         else:
             try:
-                chat = ChatService(settings)
-                result = chat.answer_question(question.strip())
+                chat = ChatService(session_settings)
+                source_scope = set(st.session_state.selected_sources) if st.session_state.selected_sources else None
+                result = chat.answer_question(question.strip(), allowed_sources=source_scope)
                 st.session_state.last_result = result
                 st.session_state.messages.append({"role": "user", "content": question.strip()})
                 st.session_state.messages.append({"role": "assistant", "content": result.answer})
@@ -146,6 +189,8 @@ with tab_chat:
         if result is None:
             st.info("Your latest grounded answer will appear here.")
         else:
+            route_type = result.debug.get("router", {}).get("route_type", result.debug.get("question_scope", "unknown"))
+            st.write(f"Route: `{route_type}`")
             st.write(f"Confidence: {badge_for_confidence(result.confidence)}")
             st.write(f"Status: **{grounded_label(result)}**")
             st.markdown("**Citations**")
@@ -200,10 +245,11 @@ with tab_eval:
         with run_col:
             if st.button("Run all evaluation cases", type="primary", use_container_width=True):
                 runs: list[dict] = []
-                chat = ChatService(settings)
+                chat = ChatService(session_settings)
                 progress = st.progress(0.0)
                 for idx, case in enumerate(cases, start=1):
-                    result = chat.answer_question(str(case.get("question", "")).strip())
+                    source_scope = set(st.session_state.selected_sources) if st.session_state.selected_sources else None
+                    result = chat.answer_question(str(case.get("question", "")).strip(), allowed_sources=source_scope)
                     evaluation = evaluate_answer(case, result)
                     runs.append(
                         {

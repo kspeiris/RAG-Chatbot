@@ -12,6 +12,7 @@ __pycache__/
 data/uploads/
 data/csv_data.sqlite
 data/csv_registry.json
+data/sessions/
 
 # Streamlit local state/secrets
 .streamlit/secrets.toml

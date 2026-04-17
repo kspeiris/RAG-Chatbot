@@ -51,11 +51,14 @@ class CSVRegistry:
     def register_csv(self, file_name: str, data: bytes) -> dict[str, Any]:
         return self.register_tabular_file(file_name, data)[0]
 
-    def list_datasets(self) -> list[dict[str, Any]]:
-        return list(self._read_registry().get("datasets", []))
+    def list_datasets(self, allowed_file_names: set[str] | None = None) -> list[dict[str, Any]]:
+        datasets = list(self._read_registry().get("datasets", []))
+        if not allowed_file_names:
+            return datasets
+        return [dataset for dataset in datasets if str(dataset.get("file_name", "")) in allowed_file_names]
 
-    def has_datasets(self) -> bool:
-        return bool(self.list_datasets())
+    def has_datasets(self, allowed_file_names: set[str] | None = None) -> bool:
+        return bool(self.list_datasets(allowed_file_names=allowed_file_names))
 
     def get_dataset_by_hash(self, file_hash: str) -> dict[str, Any] | None:
         for dataset in self.list_datasets():
@@ -63,8 +66,8 @@ class CSVRegistry:
                 return dataset
         return None
 
-    def schema_context(self) -> str:
-        datasets = self.list_datasets()
+    def schema_context(self, allowed_file_names: set[str] | None = None) -> str:
+        datasets = self.list_datasets(allowed_file_names=allowed_file_names)
         if not datasets:
             return "No tabular datasets are registered."
 
@@ -93,13 +96,18 @@ class CSVRegistry:
         with sqlite3.connect(self.settings.sqlite_db_path) as conn:
             return pd.read_sql_query(wrapped_sql, conn)
 
-    def tables_mentioned(self, sql: str) -> list[dict[str, Any]]:
+    def tables_mentioned(self, sql: str, allowed_file_names: set[str] | None = None) -> list[dict[str, Any]]:
         sql_lower = sql.lower()
         matches: list[dict[str, Any]] = []
-        for dataset in self.list_datasets():
+        for dataset in self.list_datasets(allowed_file_names=allowed_file_names):
             if dataset["table_name"].lower() in sql_lower:
                 matches.append(dataset)
         return matches
+
+    def clear(self) -> None:
+        self._write_registry({"datasets": []})
+        if self.settings.sqlite_db_path.exists():
+            self.settings.sqlite_db_path.unlink()
 
     def _sample_rows(self, table_name: str, limit: int = 3) -> list[dict[str, Any]]:
         if not self.settings.sqlite_db_path.exists():
@@ -227,24 +235,28 @@ class CSVQueryService:
         self.registry = CSVRegistry(settings)
         self.llm = llm or LLMService(settings)
 
-    def has_datasets(self) -> bool:
-        return self.registry.has_datasets()
+    def has_datasets(self, allowed_file_names: set[str] | None = None) -> bool:
+        return self.registry.has_datasets(allowed_file_names=allowed_file_names)
 
-    def try_answer(self, question: str) -> AnswerResult | None:
-        if not self.registry.has_datasets():
+    def try_answer(self, question: str, allowed_file_names: set[str] | None = None) -> AnswerResult | None:
+        if not self.registry.has_datasets(allowed_file_names=allowed_file_names):
             return None
 
+        schema_answer = self.answer_schema_question(question, allowed_file_names=allowed_file_names)
+        if schema_answer is not None:
+            return schema_answer
+
         if not self.llm.supports_chat_json():
-            return self._try_answer_local(question)
+            return self._try_answer_local(question, allowed_file_names=allowed_file_names)
 
         try:
             planner = self.llm.chat_json(
                 SQL_PLANNER_SYSTEM_PROMPT,
-                self._planner_prompt(question),
+                self._planner_prompt(question, allowed_file_names=allowed_file_names),
                 temperature=0,
             )
         except LocalLLMUnavailableError:
-            return self._try_answer_local(question)
+            return self._try_answer_local(question, allowed_file_names=allowed_file_names)
         if not bool(planner.get("use_structured_query", False)):
             return None
 
@@ -253,14 +265,24 @@ class CSVQueryService:
             return None
 
         result_df = self.registry.execute_query(sql, self.settings.max_sql_result_rows)
-        tables_used = self.registry.tables_mentioned(sql)
-        file_names = [item["file_name"] for item in tables_used] or [item["file_name"] for item in self.registry.list_datasets()]
+        tables_used = self.registry.tables_mentioned(sql, allowed_file_names=allowed_file_names)
+        file_names = [item["file_name"] for item in tables_used] or [
+            item["file_name"] for item in self.registry.list_datasets(allowed_file_names=allowed_file_names)
+        ]
         result_records = json.loads(result_df.to_json(orient="records", force_ascii=False))
         result_preview = json.dumps(result_records[: self.settings.max_sql_result_rows], ensure_ascii=False)
         try:
             answer_payload = self.llm.chat_json(
                 SQL_ANSWER_SYSTEM_PROMPT,
-                self._answer_prompt(question, planner, sql, file_names, result_df, result_preview),
+                self._answer_prompt(
+                    question,
+                    planner,
+                    sql,
+                    file_names,
+                    result_df,
+                    result_preview,
+                    allowed_file_names=allowed_file_names,
+                ),
                 temperature=0,
             )
         except LocalLLMUnavailableError:
@@ -306,20 +328,47 @@ class CSVQueryService:
             },
         )
 
-    def _try_answer_local(self, question: str) -> AnswerResult | None:
-        planner = self._local_planner(question)
+    def _try_answer_local(self, question: str, allowed_file_names: set[str] | None = None) -> AnswerResult | None:
+        planner = self._local_planner(question, allowed_file_names=allowed_file_names)
         if not bool(planner.get("use_structured_query", False)):
             return None
 
         sql = str(planner.get("sql", "")).strip()
-        if not sql:
+        if not sql and not bool(planner.get("schema_only", False)):
             return None
 
+        if bool(planner.get("schema_only", False)):
+            answer = self._summarize_local_result(question, planner, pd.DataFrame(), allowed_file_names=allowed_file_names)
+            dataset = self._best_dataset(question, allowed_file_names=allowed_file_names)
+            if dataset is None:
+                return None
+            columns = [str(col["original"]) for col in dataset.get("columns", [])]
+            return AnswerResult(
+                answer=answer,
+                citations=[
+                    {
+                        "file_name": dataset["file_name"],
+                        "locator": "table schema",
+                        "quote": f"Columns: {', '.join(columns)}"[:200],
+                    }
+                ],
+                confidence="high",
+                grounded=True,
+                debug={
+                    "mode": "csv_schema_local",
+                    "dataset": dataset["file_name"],
+                    "operation": planner.get("operation"),
+                    "column_count": len(columns),
+                },
+            )
+
         result_df = self.registry.execute_query(sql, self.settings.max_sql_result_rows)
-        tables_used = self.registry.tables_mentioned(sql)
-        file_names = [item["file_name"] for item in tables_used] or [item["file_name"] for item in self.registry.list_datasets()]
+        tables_used = self.registry.tables_mentioned(sql, allowed_file_names=allowed_file_names)
+        file_names = [item["file_name"] for item in tables_used] or [
+            item["file_name"] for item in self.registry.list_datasets(allowed_file_names=allowed_file_names)
+        ]
         citations = self._fallback_citations(tables_used, result_df)
-        answer = self._summarize_local_result(question, planner, result_df)
+        answer = self._summarize_local_result(question, planner, result_df, allowed_file_names=allowed_file_names)
         citation_check = self._validate_citations(citations, tables_used, result_df)
         confidence = "high" if not result_df.empty else "medium"
         grounded = citation_check["invalid_count"] == 0
@@ -341,8 +390,8 @@ class CSVQueryService:
             },
         )
 
-    def _local_planner(self, question: str) -> dict[str, Any]:
-        dataset = self._best_dataset(question)
+    def _local_planner(self, question: str, allowed_file_names: set[str] | None = None) -> dict[str, Any]:
+        dataset = self._best_dataset(question, allowed_file_names=allowed_file_names)
         if not dataset:
             return {"use_structured_query": False, "reason": "no_dataset_match"}
 
@@ -350,6 +399,17 @@ class CSVQueryService:
         column = self._best_column(question, dataset)
         where_clause = self._detect_numeric_filter(question, dataset)
         table_name = dataset["table_name"]
+
+        if operation in {"column_count", "list_columns", "row_count"}:
+            return {
+                "use_structured_query": True,
+                "mode": "local_heuristic",
+                "dataset": dataset["file_name"],
+                "operation": operation,
+                "column": None,
+                "sql": "",
+                "schema_only": True,
+            }
 
         if operation == "count":
             sql = f'SELECT COUNT(*) AS count FROM "{table_name}"{where_clause}'
@@ -375,7 +435,26 @@ class CSVQueryService:
             "sql": sql,
         }
 
-    def _summarize_local_result(self, question: str, planner: dict[str, Any], result_df: pd.DataFrame) -> str:
+    def _summarize_local_result(
+        self,
+        question: str,
+        planner: dict[str, Any],
+        result_df: pd.DataFrame,
+        allowed_file_names: set[str] | None = None,
+    ) -> str:
+        if bool(planner.get("schema_only", False)):
+            dataset = self._best_dataset(question, allowed_file_names=allowed_file_names)
+            if not dataset:
+                return "I could not find a matching tabular dataset."
+            operation = str(planner.get("operation", ""))
+            columns = [str(col["original"]) for col in dataset.get("columns", [])]
+            if operation == "column_count":
+                return f"The dataset contains {len(columns)} columns."
+            if operation == "row_count":
+                return f"The dataset contains {int(dataset.get('row_count', 0))} rows."
+            if operation == "list_columns":
+                return f"The dataset columns are: {', '.join(columns)}."
+
         if result_df.empty:
             return "No matching rows were found in the tabular data."
 
@@ -396,8 +475,8 @@ class CSVQueryService:
         preview = json.loads(result_df.head(min(len(result_df), 5)).to_json(orient="records", force_ascii=False))
         return f"I found {len(result_df)} matching rows. Preview: {json.dumps(preview, ensure_ascii=False)}"
 
-    def _best_dataset(self, question: str) -> dict[str, Any] | None:
-        datasets = self.registry.list_datasets()
+    def _best_dataset(self, question: str, allowed_file_names: set[str] | None = None) -> dict[str, Any] | None:
+        datasets = self.registry.list_datasets(allowed_file_names=allowed_file_names)
         if not datasets:
             return None
         q = question.lower()
@@ -429,6 +508,12 @@ class CSVQueryService:
 
     def _detect_operation(self, question: str) -> str:
         lowered = question.lower()
+        if any(token in lowered for token in ["how many columns", "number of columns", "column count"]):
+            return "column_count"
+        if any(token in lowered for token in ["how many rows", "number of rows", "row count"]):
+            return "row_count"
+        if any(token in lowered for token in ["what columns", "which columns", "column names", "headers"]):
+            return "list_columns"
         if any(token in lowered for token in ["how many", "count", "number of"]):
             return "count"
         if any(token in lowered for token in ["average", "avg", "mean"]):
@@ -457,10 +542,10 @@ class CSVQueryService:
                 return f' WHERE "{column}" {operator} {match.group(1)}'
         return ""
 
-    def _planner_prompt(self, question: str) -> str:
+    def _planner_prompt(self, question: str, allowed_file_names: set[str] | None = None) -> str:
         return (
             f"Question:\n{question}\n\n"
-            f"Available tabular schemas:\n{self.registry.schema_context()}\n\n"
+            f"Available tabular schemas:\n{self.registry.schema_context(allowed_file_names=allowed_file_names)}\n\n"
             "Return JSON only."
         )
 
@@ -472,8 +557,9 @@ class CSVQueryService:
         file_names: list[str],
         result_df: pd.DataFrame,
         result_preview: str,
+        allowed_file_names: set[str] | None = None,
     ) -> str:
-        schema = self.registry.schema_context()
+        schema = self.registry.schema_context(allowed_file_names=allowed_file_names)
         files_line = ", ".join(file_names) if file_names else "unknown"
         return (
             f"Question:\n{question}\n\n"
@@ -485,6 +571,46 @@ class CSVQueryService:
             f"Result columns: {list(result_df.columns)}\n"
             f"Result preview JSON:\n{result_preview}\n\n"
             "Return JSON only."
+        )
+
+    def answer_schema_question(self, question: str, allowed_file_names: set[str] | None = None) -> AnswerResult | None:
+        dataset = self._best_dataset(question, allowed_file_names=allowed_file_names)
+        if not dataset:
+            return None
+
+        operation = self._detect_operation(question)
+        if operation not in {"column_count", "row_count", "list_columns"}:
+            return None
+
+        columns = [str(col["original"]) for col in dataset.get("columns", [])]
+        if operation == "column_count":
+            answer = f"The dataset contains {len(columns)} columns."
+            quote = f"Columns ({len(columns)}): {', '.join(columns)}"
+        elif operation == "row_count":
+            answer = f"The dataset contains {int(dataset.get('row_count', 0))} rows."
+            quote = f"Rows: {int(dataset.get('row_count', 0))}"
+        else:
+            answer = f"The dataset columns are: {', '.join(columns)}."
+            quote = f"Columns: {', '.join(columns)}"
+
+        return AnswerResult(
+            answer=answer,
+            citations=[
+                {
+                    "file_name": dataset["file_name"],
+                    "locator": "table schema",
+                    "quote": quote[:200],
+                }
+            ],
+            confidence="high",
+            grounded=True,
+            debug={
+                "mode": "csv_schema",
+                "dataset": dataset["file_name"],
+                "operation": operation,
+                "column_count": len(columns),
+                "row_count": int(dataset.get("row_count", 0)),
+            },
         )
 
     def _fallback_citations(self, tables_used: list[dict[str, Any]], result_df: pd.DataFrame) -> list[dict[str, Any]]:

@@ -13,6 +13,36 @@ GENERAL_PATTERNS = [
     r"^what does .* mean\b",
 ]
 
+STRUCTURED_HINTS = [
+    "column",
+    "columns",
+    "header",
+    "headers",
+    "field",
+    "fields",
+    "row",
+    "rows",
+    "table",
+    "dataset",
+    "spreadsheet",
+    "csv",
+    "xlsx",
+    "tsv",
+    "group by",
+    "average",
+    "avg",
+    "sum",
+    "count",
+    "total",
+    "top 10",
+    "top ",
+    "bottom ",
+    "greater than",
+    "less than",
+    "below",
+    "above",
+]
+
 DOCUMENT_HINTS = [
     "in the document",
     "in this document",
@@ -35,20 +65,32 @@ DOCUMENT_PATTERNS = [
 ]
 
 
-def classify_question(question: str) -> str:
+def classify_question(question: str, has_tabular: bool = True, has_documents: bool = True) -> str:
     query = question.strip().lower()
     if not query:
-        return "document"
+        return "unstructured"
 
-    if any(hint in query for hint in DOCUMENT_HINTS):
-        return "document"
+    doc_hint = any(hint in query for hint in DOCUMENT_HINTS) or any(re.search(pattern, query) for pattern in DOCUMENT_PATTERNS)
+    structured_hint = any(hint in query for hint in STRUCTURED_HINTS)
+    general_hint = any(re.search(pattern, query) for pattern in GENERAL_PATTERNS)
 
-    for pattern in DOCUMENT_PATTERNS:
-        if re.search(pattern, query):
-            return "document"
+    if general_hint and not doc_hint and not structured_hint:
+        return "general_definition"
 
-    for pattern in GENERAL_PATTERNS:
-        if re.search(pattern, query):
-            return "general"
+    if structured_hint and doc_hint and has_tabular and has_documents:
+        return "hybrid"
 
-    return "document"
+    if structured_hint and has_tabular:
+        return "structured"
+
+    if doc_hint and has_documents:
+        return "unstructured"
+
+    if general_hint:
+        return "general_definition"
+
+    if has_documents:
+        return "unstructured"
+    if has_tabular:
+        return "structured"
+    return "unstructured"

@@ -24,7 +24,7 @@ class IngestionService:
         self.parser = FileParser()
         self.chunker = TextChunker(settings.chunk_size, settings.chunk_overlap, settings.min_chunk_chars)
         self.llm = LLMService(settings)
-        self.store = VectorStore(path=str(settings.qdrant_path), collection_name=settings.collection_name)
+        self.store = VectorStore(path=str(settings.qdrant_path), collection_name=settings.scoped_collection_name)
         self.csv_registry = CSVRegistry(settings)
 
     def ingest_bytes(self, file_name: str, data: bytes) -> IngestResult:

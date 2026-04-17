@@ -109,6 +109,10 @@ class VectorStore:
                 break
         return sorted(docs)
 
+    def clear_collection(self) -> None:
+        if self.collection_exists():
+            self.client.delete_collection(self.collection_name)
+
     @staticmethod
     def _to_retrieved_chunk(payload: dict, score: float) -> RetrievedChunk:
         return RetrievedChunk(
