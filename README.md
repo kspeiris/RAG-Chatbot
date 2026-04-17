@@ -2,7 +2,7 @@
 
 Grounded Q&A for uploaded documents and spreadsheets, with citations you can verify. Organize knowledge into workspaces, index mixed file types, and route questions through either document retrieval or safe SQLite analytics.
 
-## ✨ Highlights
+## :sparkles: Highlights
 
 - **Workspaces**: separate corpora with isolated vector + tabular storage.
 - **Multi-format ingestion**: PDF, scanned PDF, images, TXT/MD, DOCX, HTML/XML, JSON/JSONL, CSV/TSV, XLSX.
@@ -11,7 +11,7 @@ Grounded Q&A for uploaded documents and spreadsheets, with citations you can ver
 - **Tabular analytics**: tabular questions can run read-only SQLite queries with guardrails and row-level citations.
 - **OCR fallback**: Tesseract OCR kicks in for sparse PDF pages and uploaded images when available.
 
-## 📸 Screenshots
+## :camera: Screenshots
 
 These are lightweight SVG previews (kept in git). Replace with real app screenshots anytime.
 
@@ -19,7 +19,7 @@ These are lightweight SVG previews (kept in git). Replace with real app screensh
 
 ![Ask & Analyze](docs/screenshots/ask-analyze.svg)
 
-## 🚀 Quickstart (Local)
+## :rocket: Quickstart (Local)
 
 1. Create a virtual environment and install dependencies.
 
@@ -41,7 +41,7 @@ Copy-Item .env.example .env
 streamlit run app.py
 ```
 
-## 🧩 Configuration
+## :gear: Configuration
 
 Configuration is read from `.env` (local) and Streamlit secrets (deployment). See `src/config.py` for the full list.
 
@@ -91,32 +91,32 @@ Notes:
 - `data/` is runtime state (uploads, SQLite, workspace registry) and is intentionally ignored by git.
 - Changing embedding models changes vector dimensionality; if Qdrant has an existing collection with a different size, reindex by clearing workspace knowledge.
 
-## 🏗️ System Architecture
+## :building_construction: System Architecture
 
 ### Component view
 
 ```mermaid
 flowchart LR
-  UI[Streamlit UI\napp.py] --> WM[WorkspaceManager\nsrc/workspaces.py]
-  UI --> ING[IngestionService\nsrc/ingest.py]
-  UI --> CHAT[ChatService\nsrc/chat.py]
+  UI["Streamlit UI<br/>app.py"] --> WM["WorkspaceManager<br/>src/workspaces.py"]
+  UI --> ING["IngestionService<br/>src/ingest.py"]
+  UI --> CHAT["ChatService<br/>src/chat.py"]
 
-  ING --> PARSER[FileParser\nsrc/parsers.py]
-  PARSER --> OCR[OCRService\nsrc/ocr_utils.py]
-  ING --> CHUNK[TextChunker\nsrc/chunking.py]
-  ING --> EMBED[LLMService.embed_texts\nsrc/llm.py]
-  ING --> VS[VectorStore (Qdrant local)\nsrc/storage.py]
-  ING --> CSVREG[CSVRegistry (SQLite)\nsrc/csv_query.py]
+  ING --> PARSER["FileParser<br/>src/parsers.py"]
+  PARSER --> OCR["OCRService<br/>src/ocr_utils.py"]
+  ING --> CHUNK["TextChunker<br/>src/chunking.py"]
+  ING --> EMBED["LLMService.embed_texts<br/>src/llm.py"]
+  ING --> VS["VectorStore<br/>(Qdrant local)<br/>src/storage.py"]
+  ING --> CSVREG["CSVRegistry<br/>(SQLite)<br/>src/csv_query.py"]
 
-  CHAT --> ROUTER[Question router\nsrc/question_router.py]
-  CHAT --> EMBEDQ[LLMService.embed_query\nsrc/llm.py]
+  CHAT --> ROUTER["Question router<br/>src/question_router.py"]
+  CHAT --> EMBEDQ["LLMService.embed_query<br/>src/llm.py"]
   EMBEDQ --> VS
-  CHAT --> HYB[HybridRetriever + BM25\nsrc/retrieval.py]
-  HYB --> RERANK[AdvancedReranker\nsrc/retrieval.py]
-  CHAT --> PROMPTS[Grounding prompts\nsrc/prompts.py]
-  PROMPTS --> LLM[LLMService.chat_json/text\nsrc/llm.py]
+  CHAT --> HYB["HybridRetriever + BM25<br/>src/retrieval.py"]
+  HYB --> RERANK["AdvancedReranker<br/>src/retrieval.py"]
+  CHAT --> PROMPTS["Grounding prompts<br/>src/prompts.py"]
+  PROMPTS --> LLM["LLMService.chat_json/text<br/>src/llm.py"]
 
-  CHAT --> CSVQ[CSVQueryService\nsrc/csv_query.py]
+  CHAT --> CSVQ["CSVQueryService<br/>src/csv_query.py"]
   CSVQ --> CSVREG
 ```
 
@@ -153,7 +153,7 @@ sequenceDiagram
   end
 ```
 
-## 🗂️ Repository Map
+## :card_index_dividers: Repository Map
 
 - `app.py`: Streamlit UI (Workspaces, Upload & Index, Ask & Analyze, Evaluation Lab).
 - `src/config.py`: environment-based settings and workspace-scoped paths.
@@ -170,12 +170,12 @@ sequenceDiagram
 - `src/evaluation.py`: save evaluation cases and score grounded/citation outcomes.
 - `src/models.py`: dataclasses for chunks and answer results.
 
-## ☁️ Deployment (Streamlit Cloud)
+## :cloud: Deployment (Streamlit Cloud)
 
 - Put secrets in `.streamlit/secrets.toml` or Streamlit Cloud secrets.
 - `packages.txt` is included for OCR system dependencies in environments that support it.
 
-## 🔍 Troubleshooting
+## :mag: Troubleshooting
 
 - **OCR doesn’t run**: ensure Tesseract is installed and available on PATH; `OCR_ENABLED=true` must be set.
 - **Cross-encoder reranker is slow**: set `ENABLE_CROSS_ENCODER_RERANKER=false` to use the heuristic reranker.
